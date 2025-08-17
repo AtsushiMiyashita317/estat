@@ -420,19 +420,26 @@ SELECT ?code5 ?name_ja ?pref_ja WHERE {
 ORDER BY ?code5
 """
     res = _sparql_post(q)
+    print("[debug] SPARQL response:", json.dumps(res)[:1000])  # 先頭1000文字だけ表示
     if not res:
+        print("[debug] SPARQL response is None")
         return None
     rows = res.get("results", {}).get("bindings", [])
+    print(f"[debug] SPARQL bindings count: {len(rows)}")
     out: List[Dict[str, Any]] = []
     for b in rows:
-        code5 = b.get("code5", {}).get("value")
-        name_ja = b.get("name_ja", {}).get("value")
-        pref_ja = b.get("pref_ja", {}).get("value")
+        code5 = b.get("CODE5", {}).get("value")
+        name_ja = b.get("NAME_JA", {}).get("value")
+        pref_ja = b.get("PREF_JA", {}).get("value")
         if code5 and name_ja and pref_ja:
             try:
                 out.append({"area_code": int(code5), "area_name": name_ja, "pref_name": pref_ja})
             except Exception:
+                print(f"[debug] failed to parse code5={code5}")
                 continue
+        else:
+            print(f"[debug] missing field: code5={code5}, name_ja={name_ja}, pref_ja={pref_ja}")
+    print(f"[debug] parsed municipalities: {len(out)}")
     return out
 
 
@@ -458,15 +465,38 @@ def build_areas(base: Path, no_remote: bool = False):
         rows = [{"area_code": int(c), "area_name": None, "pref_code": int(c)//1000, "pref_name": None, "status": None} for c in sorted(codes)]
         print(f"[areas] discovered {len(rows)} codes (fallback)")
     else:
+        def detect_area_type(code: int, name: str) -> int:
+            # 0:政令指定都市, 1:市, 2:区, 3:町, 4:村
+            # 政令指定都市コードリスト
+            seirei_codes = [1100,4100,11100,12100,14100,14130,14210,15100,22100,22130,23100,26100,27100,27140,28100,33100,34100,40100,40130,43100]
+            # 区判定
+            if name.endswith("区"):
+                return 2
+            # 政令指定都市
+            if any(code // 100 == c // 100 for c in seirei_codes):
+                return 0
+            # 市
+            if name.endswith("市"):
+                return 1
+            # 町
+            if name.endswith("町"):
+                return 3
+            # 村
+            if name.endswith("村"):
+                return 4
+            return -1
+
         rows = []
         for rec in data:
             code = int(rec["area_code"])
+            area_type = detect_area_type(code, rec["area_name"])
             rows.append({
                 "area_code": code,
                 "area_name": rec["area_name"],
+                "area_type": area_type,
                 "pref_code": code // 1000,
                 "pref_name": rec["pref_name"],
-                "status": None
+                "status": None,
             })
 
     if _HAS_POLARS:
@@ -476,6 +506,7 @@ def build_areas(base: Path, no_remote: bool = False):
             pl.col("pref_code").cast(pl.Int16),
             pl.col("pref_name").cast(pl.Utf8),
             pl.col("status").cast(pl.Utf8),
+            pl.col("area_type").cast(pl.Int8),
         ).sort(["area_code"])
     else:
         df = pd.DataFrame(rows).sort_values(["area_code"])
@@ -498,10 +529,10 @@ def main():
     base = Path(args.base)
     base.mkdir(parents=True, exist_ok=True)
 
-    print(f"[catalog_build] scanning items under {base} ...")
-    appid = None if args.no_remote else args.appid
-    build_items(base, appid=appid, sleep_sec=args.sleep)
-    print(f"[catalog_build] items.parquet written")
+    # print(f"[catalog_build] scanning items under {base} ...")
+    # appid = None if args.no_remote else args.appid
+    # build_items(base, appid=appid, sleep_sec=args.sleep)
+    # print(f"[catalog_build] items.parquet written")
 
     print(f"[catalog_build] building areas (SPARQL {'disabled' if args.no_remote else 'enabled'}) ...")
     build_areas(base, no_remote=args.no_remote)
